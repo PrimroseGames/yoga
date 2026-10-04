@@ -668,6 +668,8 @@ void zeroOutLayoutRecursively(yoga::Node* const node) {
   node->setLayoutDimension(0, Dimension::Width);
   node->setLayoutDimension(0, Dimension::Height);
   node->setHasNewLayout(true);
+  // Clean, so a later edit anywhere beneath re-dirties the hidden root.
+  node->setDirty(false);
 
   node->cloneChildrenIfNeeded();
   for (const auto child : node->getChildren()) {
@@ -781,7 +783,12 @@ static float computeFlexBasisForChildren(
       // `cloneChildrenIfNeeded()`). Such a leaked flag survives the commit and
       // is copied into lazily-shared clones, later tripping the ownership
       // assertion in `YogaLayoutableShadowNode::layout`.
-      if (performLayout) {
+      // A clean, already-zeroed hidden subtree is unchanged since the pass that
+      // zeroed it: any edit beneath it would have dirtied it on the way up.
+      const bool alreadyZeroed = !child->isDirty() &&
+          child->getLayout().dimension(Dimension::Width) == 0.0f &&
+          child->getLayout().dimension(Dimension::Height) == 0.0f;
+      if (performLayout && !alreadyZeroed) {
         zeroOutLayoutRecursively(child);
         child->setHasNewLayout(true);
         child->setDirty(false);

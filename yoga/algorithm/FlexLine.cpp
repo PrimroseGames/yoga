@@ -5,6 +5,10 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+#include <algorithm>
+#include <memory>
+#include <vector>
+
 #include <yoga/Yoga.h>
 
 #include <yoga/algorithm/BoundAxis.h>
@@ -12,6 +16,77 @@
 #include <yoga/algorithm/FlexLine.h>
 
 namespace facebook::yoga {
+
+namespace {
+
+struct FlexLineScratch {
+  struct Block {
+    std::unique_ptr<yoga::Node*[]> data;
+    size_t capacity{0};
+  };
+
+  static constexpr size_t kMinBlockCapacity = 1024;
+
+  std::vector<Block> blocks;
+  size_t block{0};
+  size_t offset{0};
+
+  yoga::Node** allocate(size_t capacity) {
+    for (;;) {
+      if (block == blocks.size()) {
+        const size_t previous = blocks.empty() ? 0 : blocks.back().capacity;
+        const size_t size =
+            std::max({capacity, previous * 2, kMinBlockCapacity});
+        blocks.push_back(
+            Block{std::make_unique<yoga::Node*[]>(size), size});
+      }
+
+      Block& current = blocks[block];
+      if (current.capacity - offset >= capacity) {
+        yoga::Node** result = current.data.get() + offset;
+        offset += capacity;
+        return result;
+      }
+
+      // Nothing live in an untouched block, so a too-small one can be resized.
+      if (offset == 0) {
+        const size_t size = std::max(capacity, current.capacity * 2);
+        current = Block{std::make_unique<yoga::Node*[]>(size), size};
+        continue;
+      }
+
+      block++;
+      offset = 0;
+    }
+  }
+};
+
+thread_local FlexLineScratch tFlexLineScratch;
+
+} // namespace
+
+FlexLineItems::FlexLineItems(size_t capacity)
+    : markBlock_(tFlexLineScratch.block),
+      markOffset_(tFlexLineScratch.offset),
+      owns_(true) {
+  data_ = tFlexLineScratch.allocate(capacity);
+}
+
+FlexLineItems::FlexLineItems(FlexLineItems&& other) noexcept
+    : data_(other.data_),
+      size_(other.size_),
+      markBlock_(other.markBlock_),
+      markOffset_(other.markOffset_),
+      owns_(other.owns_) {
+  other.owns_ = false;
+}
+
+FlexLineItems::~FlexLineItems() {
+  if (owns_) {
+    tFlexLineScratch.block = markBlock_;
+    tFlexLineScratch.offset = markOffset_;
+  }
+}
 
 FlexLine calculateFlexLine(
     yoga::Node* const node,
@@ -22,8 +97,7 @@ FlexLine calculateFlexLine(
     const float availableInnerMainDim,
     Node::LayoutableChildren::Iterator& iterator,
     const size_t lineCount) {
-  std::vector<yoga::Node*> itemsInFlow;
-  itemsInFlow.reserve(node->getChildCount());
+  FlexLineItems itemsInFlow(node->getLayoutChildCount());
 
   float sizeConsumed = 0.0f;
   float totalFlexGrowFactors = 0.0f;

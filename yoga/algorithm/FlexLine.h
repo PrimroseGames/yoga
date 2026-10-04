@@ -37,11 +37,56 @@ struct FlexLineRunningLayout {
   float crossDim{0.0f};
 };
 
+// A line's item list, carved from a per-thread LIFO scratch stack so laying out
+// a line does not touch the heap once the stack is warm. Lines nest with the
+// recursion and die in reverse order, which is what makes the stack valid.
+class FlexLineItems {
+ public:
+  FlexLineItems() = default;
+  explicit FlexLineItems(size_t capacity);
+  FlexLineItems(FlexLineItems&& other) noexcept;
+  FlexLineItems(const FlexLineItems&) = delete;
+  FlexLineItems& operator=(const FlexLineItems&) = delete;
+  FlexLineItems& operator=(FlexLineItems&&) = delete;
+  ~FlexLineItems();
+
+  void push_back(yoga::Node* node) {
+    data_[size_++] = node;
+  }
+
+  yoga::Node* const* begin() const {
+    return data_;
+  }
+
+  yoga::Node* const* end() const {
+    return data_ + size_;
+  }
+
+  size_t size() const {
+    return size_;
+  }
+
+  bool empty() const {
+    return size_ == 0;
+  }
+
+  yoga::Node* back() const {
+    return data_[size_ - 1];
+  }
+
+ private:
+  yoga::Node** data_{nullptr};
+  size_t size_{0};
+  size_t markBlock_{0};
+  size_t markOffset_{0};
+  bool owns_{false};
+};
+
 struct FlexLine {
   // List of children which are part of the line flow. This means they are not
   // positioned absolutely, or with `display: "none"`, and do not overflow the
   // available dimensions.
-  const std::vector<yoga::Node*> itemsInFlow{};
+  FlexLineItems itemsInFlow{};
 
   // Accumulation of the dimensions and margin of all the children on the
   // current line. This will be used in order to either set the dimensions of
