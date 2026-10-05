@@ -135,6 +135,69 @@ static bool hasPercentageLength(const Style& style) {
       style.gap(Gutter::Row).isPercent() || style.gap(Gutter::All).isPercent();
 }
 
+// Whether `style` sizes or spaces its box by a percentage of its owner's
+// width. Percentage margins and padding resolve against that width on every
+// edge.
+static bool usesPercentageOfOwnerWidth(
+    const Style& style,
+    const bool ownerMainAxisIsRow) {
+  if (style.dimension(Dimension::Width).isPercent() ||
+      style.minDimension(Dimension::Width).isPercent() ||
+      style.maxDimension(Dimension::Width).isPercent() ||
+      (ownerMainAxisIsRow && style.flexBasis().isPercent())) {
+    return true;
+  }
+
+  constexpr std::array<Edge, 9> edges = {
+      Edge::Left,
+      Edge::Top,
+      Edge::Right,
+      Edge::Bottom,
+      Edge::Start,
+      Edge::End,
+      Edge::Horizontal,
+      Edge::Vertical,
+      Edge::All};
+  for (const auto edge : edges) {
+    if (style.margin(edge).isPercent() || style.padding(edge).isPercent()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether the width `node` settles on feeds back into its own content: some
+// in-flow descendant, reached through boxes that take their width from
+// `node`, resolves a percentage against it. A descendant with a width of its
+// own in points ends the chain, and an absolutely positioned one is laid out
+// after its containing block is sized.
+static bool contentResolvesPercentageOfWidth(const yoga::Node* const node) {
+  const auto& style = node->style();
+  if (style.gap(Gutter::Column).isPercent() ||
+      style.gap(Gutter::All).isPercent()) {
+    return true;
+  }
+
+  const bool mainAxisIsRow = isRow(style.flexDirection());
+  for (const auto child : node->getLayoutChildren()) {
+    const auto& childStyle = child->style();
+    if (childStyle.display() == Display::None ||
+        childStyle.positionType() == PositionType::Absolute) {
+      continue;
+    }
+    if (usesPercentageOfOwnerWidth(childStyle, mainAxisIsRow)) {
+      return true;
+    }
+    if (child->getProcessedDimension(Dimension::Width).isPoints()) {
+      continue;
+    }
+    if (contentResolvesPercentageOfWidth(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool hasNonZeroFlex(const yoga::Node& node) {
   const auto& style = node.style();
   const auto flex = style.flex();
@@ -2799,12 +2862,47 @@ bool calculateLayoutInternal(
     (performLayout ? layoutMarkerData.cachedLayouts
                    : layoutMarkerData.cachedMeasures) += 1;
   } else {
+    float layoutWidth = availableWidth;
+    SizingMode layoutWidthSizingMode = widthSizingMode;
+
+    // A box sized to fit its content takes the smaller of its content's
+    // widest extent and the space on offer. Content that resolves a
+    // percentage against the box's width would otherwise resolve it against
+    // the offer and stretch the box to all of it. So the content is measured
+    // on its own first, with those percentages behaving as auto, and the box
+    // is then laid out at the width that gives.
+    if (widthSizingMode == SizingMode::FitContent && !node->hasMeasureFunc() &&
+        node->getLayoutChildCount() > 0 &&
+        contentResolvesPercentageOfWidth(node)) {
+      calculateLayoutInternal(
+          node,
+          YGUndefined,
+          availableHeight,
+          ownerDirection,
+          SizingMode::MaxContent,
+          heightSizingMode,
+          ownerWidth,
+          ownerHeight,
+          false,
+          reason,
+          layoutMarkerData,
+          depth,
+          generationCount);
+
+      const float contentWidth = layout->measuredDimension(Dimension::Width) +
+          node->style().computeMarginForAxis(FlexDirection::Row, ownerWidth);
+      if (yoga::isDefined(contentWidth)) {
+        layoutWidth = yoga::minOrDefined(availableWidth, contentWidth);
+        layoutWidthSizingMode = SizingMode::StretchFit;
+      }
+    }
+
     calculateLayoutImpl(
         node,
-        availableWidth,
+        layoutWidth,
         availableHeight,
         ownerDirection,
-        widthSizingMode,
+        layoutWidthSizingMode,
         heightSizingMode,
         ownerWidth,
         ownerHeight,
